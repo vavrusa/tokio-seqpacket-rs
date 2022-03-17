@@ -1,9 +1,10 @@
 use filedesc::FileDesc;
-use std::io::{IoSlice, IoSliceMut};
+use std::io::{self, IoSlice, IoSliceMut};
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::path::Path;
+use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::unix::AsyncFd;
+use tokio::io::{unix::AsyncFd, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ancillary::SocketAncillary;
 use crate::{UCred, sys};
@@ -315,5 +316,48 @@ impl AsRawFd for UnixSeqpacket {
 impl IntoRawFd for UnixSeqpacket {
 	fn into_raw_fd(self) -> std::os::unix::io::RawFd {
 		self.into_raw_fd()
+	}
+}
+
+// Implements the AsyncRead + AsyncWrite for a reference in order
+// to allow the implementation for the split socket as well.
+
+impl AsyncRead for &UnixSeqpacket {
+	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+		match self.poll_recv(cx, buf.initialize_unfilled()) {
+			Poll::Ready(Ok(num)) => {
+				buf.set_filled(num);
+				Poll::Ready(Ok(()))
+			},
+			Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+impl AsyncWrite for &UnixSeqpacket {
+	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+		self.poll_send(cx, buf)
+	}
+
+	fn poll_write_vectored(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		bufs: &[io::IoSlice<'_>],
+	) -> Poll<io::Result<usize>> {
+		self.poll_send_vectored(cx, bufs)
+	}
+
+	fn is_write_vectored(&self) -> bool {
+		true
+	}
+
+	fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Poll::Ready(Ok(()))
+	}
+
+	fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+		self.shutdown(std::net::Shutdown::Write)?;
+		Poll::Ready(Ok(()))
 	}
 }
